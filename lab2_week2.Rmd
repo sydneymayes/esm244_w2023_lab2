@@ -1,0 +1,167 @@
+---
+title: "ESM 244 Lab 2"
+author: "Sydney Mayes"
+date: "2023-01-19"
+output: html_document
+---
+
+```{r setup, echo=TRUE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+library(tidyverse)
+library(palmerpenguins)
+library(AICcmodavg)
+library(equatiomatic)
+```
+
+# Predicting penguin masss
+```{r}
+penguins_clean <- penguins %>% 
+  drop_na() %>% 
+  rename(mass = body_mass_g, 
+         bill_l = bill_length_mm,
+         bill_d = bill_depth_mm,
+         flip_l = flipper_length_mm)
+
+mdl1 <- lm(mass ~ bill_l + bill_d + flip_l + species + sex + island,
+           data = penguins_clean)
+# ~ read as 'is a funcion of'
+#summary(mdl1) this shows that the model has a pretty low p value
+#AIC(mdl1) 4727.242, but pointless without looking at comparison models
+
+```
+
+```{r}
+f1 <- mass ~ bill_l + bill_d + flip_l + species + sex + island
+# R recognizes this as a formula; we can now plug f1 into mdl1 to clean it up
+mdl1 <- lm(f1, data = penguins_clean)
+
+f2 <- mass ~ bill_l + bill_d + flip_l + species + sex
+mdl2 <- lm(f2, data = penguins_clean)
+
+#summary(mdl1) r-squared similar
+AIC(mdl1, mdl2)
+# mdl2 is 4723
+
+f3 <- mass ~ bill_d + flip_l + species + sex
+# using the more significant models now
+mdl3 <- lm(f3, data = penguins_clean)
+AIC(mdl1, mdl2, mdl3)
+# mdl2 has lowest score, mdl3 AIC score goes up a bit
+BIC(mdl1, mdl2, mdl3)
+# BIC penalizes parameters more so mdl3 is a little closer to mdl2
+# BIC rewards parsimony more than AIC
+
+AICcmodavg::AICc(mdl1)
+# sometimes if using an infrequent package, even if already loaded, this is helpful to remind you which package the function is coming from
+# the AICc is a correction for small samples. we have a decent sized sample though
+aictab(list(mdl1, mdl2, mdl3))
+# creates a table with more info: gives Delta_AICc which is what we want to look at. Further evidence for mdl2 being the best. Also gives log likelihood
+bictab(list(mdl1, mdl2, mdl3))
+# if delta is 2 or greater, this is decent evidence that a model is better. if it is less than 2, this is weak evidence. 6 is good, 10 over is great, over 10/12 is overwhelming evidence
+
+```
+
+# Compare models using k-fold cross validation
+```{r}
+folds <- 10 
+# take data set, break into 10 chunks, iterate over each one. 
+fold_vec <- rep(1:folds, length.out = nrow(penguins_clean))
+# runs for the number of rows in penguins data set
+# but we want it to be randomized, so use set.seed
+# psuedo-random numbers, set.seed makes it replicatable, otherwise it will be totally new and random each time
+set.seed(42)
+# 42 was chosen randomly, you can use any number
+# runif(1)
+penguins_fold <- penguins_clean %>% 
+  mutate(group = sample(fold_vec, size = n(), replace = FALSE))
+
+table(penguins_fold$group)
+
+test_df <- penguins_fold %>% 
+  filter(group == 1)
+train_df <- penguins_fold %>% 
+  filter(group != 1)
+```
+
+```{r}
+#calc_mean <- function(x) {
+#  m = sum(x) / length(x)
+#}
+calc_rmse <- function(x, y) {
+  rmse <- (x - y)^2 %>% 
+    mean() %>% 
+    sqrt()
+  return(rmse)
+}
+# assesses root mean squared error
+```
+
+```{r}
+training_mdl1 <- lm(f1, data = train_df)
+
+training_mdl2 <- lm(f2, data = train_df)
+
+training_mdl3 <- lm(f3, data = train_df)
+
+predict_test <- test_df %>% 
+  mutate(model1 = predict(training_mdl1, test_df),
+         model2 = predict(training_mdl2, test_df),
+         model3 = predict(training_mdl3, test_df))
+
+rmse_predict_test <- predict_test %>% 
+  summarize(rmse_mdl1 = calc_rmse(model1, mass),
+            rmse_mdl2 = calc_rmse(model2, mass),
+            rmse_mdl3 = calc_rmse(model3, mass))
+# shows how far off the predicted values are of models from the actual values         # results show they are pretty close: the lowest rmse is for model2   
+            
+```
+
+# Let's iterate!
+```{r}
+rmse_df <- data.frame() #creates an empty data frame
+for(i in 1:folds) {
+  ### i < 1
+  kfold_test_df <- penguins_fold %>% 
+    filter(group == i)
+  kfold_train_df <- penguins_fold %>% # df at the end of the name to remind you what kind of object it is. sf if it is a spatial features, etc. 
+    filter(group != i)
+  
+  kfold_mdl1 <- lm(f1, data = kfold_train_df)
+  kfold_mdl2 <- lm(f2, data = kfold_train_df)
+  kfold_mdl3 <- lm(f3, data = kfold_train_df)
+  
+  kfold_pred_df <- kfold_test_df %>% 
+    mutate(mdl1 = predict(kfold_mdl1, kfold_test_df),
+           mdl2 = predict(kfold_mdl2,.), # . allows you to not rewrite kfold_test_df
+           mdl3 = predict(kfold_mdl3, .))
+  
+  kfold_rmse_df <- kfold_pred_df %>% 
+    summarize(rmse_mdl1 = calc_rmse(mdl1, mass),
+              rmse_mdl2 = calc_rmse(mdl2, mass),
+              rmse_mdl3 = calc_rmse(mdl3, mass),
+              test_gp = i)
+  
+  rmse_df <- bind_rows(rmse_df, kfold_rmse_df)
+ 
+}
+# folds was 10, so creates a vector of 10 with 1:folds
+
+#take the result of running the for loop and check the means to determine which was best
+rmse_df %>% 
+  summarize(mean_rmse_mdl1 = mean(rmse_mdl1),
+            mean_rmse_mdl2 = mean(rmse_mdl2),
+            mean_rmse_mdl3 = mean(rmse_mdl3))
+# they are pretty close, but we see that mdl2 has a slightly better/lower mean. 
+
+```
+
+# Finalize the model
+```{r}
+final_mdl <- lm(f2, data = penguins_clean)
+```
+
+Our final model:
+`r equatiomatic::extract_eq(final_mdl, wrap = TRUE)`
+
+And with coefficients:
+`r equatiomatic::extract_eq(final_mdl, wrap = TRUE, use_coefs = TRUE)`
